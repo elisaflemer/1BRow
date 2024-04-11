@@ -1,34 +1,90 @@
-// r1: simple, idiomatic Go using bufio.Scanner and strconv.ParseFloat
-//
-// ~1.004s for 10M rows
-
 package main
 
 import (
 	"bufio"
+	"bytes"
 	"fmt"
 	"io"
+	"log"
 	"os"
 	"sort"
 	"strconv"
 	"strings"
 )
 
-func r1(inputPath string, output io.Writer) error {
-	type stats struct {
-		min, max, sum float64
-		count         int64
-	}
+type r8Stats struct {
+	min, max, sum float64
+	count         int64
+}
 
-	f, err := os.Open(inputPath)
+func r8(inputPath string, output io.Writer) error {
+	parts, err := splitFile(inputPath, 10)
 	if err != nil {
 		return err
 	}
-	defer f.Close()
 
-	stationStats := make(map[string]stats)
+	resultsCh := make(chan map[string]r8Stats)
+	for _, part := range parts {
+		go r8ProcessPart(inputPath, part.offset, part.size, resultsCh)
+	}
 
-	scanner := bufio.NewScanner(f)
+	totals := make(map[string]r8Stats)
+	for i := 0; i < len(parts); i++ {
+		result := <-resultsCh
+		for station, s := range result {
+			ts, ok := totals[station]
+			if !ok {
+				totals[station] = r8Stats{
+					min:   s.min,
+					max:   s.max,
+					sum:   s.sum,
+					count: s.count,
+				}
+				continue
+			}
+			ts.min = min(ts.min, s.min)
+			ts.max = max(ts.max, s.max)
+			ts.sum += s.sum
+			ts.count += s.count
+			totals[station] = ts
+		}
+	}
+
+	stations := make([]string, 0, len(totals))
+	for station := range totals {
+		stations = append(stations, station)
+	}
+	sort.Strings(stations)
+
+	fmt.Fprintln(output, "{")
+	for i, station := range stations {
+		if i > 0 {
+			fmt.Fprint(output, ", ")
+		}
+		s := totals[station]
+		mean := s.sum / float64(s.count)
+		fmt.Fprintf(output, "%s=%.1f/%.1f/%.1f", station, s.min, mean, s.max)
+	}
+	fmt.Fprintln(output, "}\n")
+	return nil
+}
+
+func r8ProcessPart(inputPath string, fileOffset, fileSize int64, resultsCh chan map[string]r8Stats) {
+	count := 0
+	file, err := os.Open(inputPath)
+	if err != nil {
+		panic(err)
+	}
+	defer file.Close()
+	_, err = file.Seek(fileOffset, io.SeekStart)
+	if err != nil {
+		panic(err)
+	}
+	f := io.LimitedReader{R: file, N: fileSize}
+
+	stationStats := make(map[string]r8Stats)
+
+	scanner := bufio.NewScanner(&f)
 	for scanner.Scan() {
 		line := scanner.Text()
 		station, tempStr, hasSemi := strings.Cut(line, ";")
@@ -38,7 +94,7 @@ func r1(inputPath string, output io.Writer) error {
 
 		temp, err := strconv.ParseFloat(tempStr, 64)
 		if err != nil {
-			return err
+			panic(err)
 		}
 
 		s, ok := stationStats[station]
@@ -54,36 +110,82 @@ func r1(inputPath string, output io.Writer) error {
 			s.count++
 		}
 		stationStats[station] = s
+		count++
 	}
 
-	stations := make([]string, 0, len(stationStats))
-	for station := range stationStats {
-		stations = append(stations, station)
-	}
-	sort.Strings(stations)
+	resultsCh <- stationStats
+}
 
-	fmt.Fprint(output, "{")
-	for i, station := range stations {
-		if i > 0 {
-			fmt.Fprint(output, ", ")
+type part struct {
+	offset, size int64
+}
+
+func splitFile(inputPath string, numParts int) ([]part, error) {
+	const maxLineLength = 100
+
+	f, err := os.Open(inputPath)
+	if err != nil {
+		return nil, err
+	}
+	st, err := f.Stat()
+	if err != nil {
+		return nil, err
+	}
+	size := st.Size()
+	splitSize := size / int64(numParts)
+
+	buf := make([]byte, maxLineLength)
+
+	parts := make([]part, 0, numParts)
+	offset := int64(0)
+	for offset < size {
+		seekOffset := max(offset+splitSize-maxLineLength, 0)
+		if seekOffset > size {
+			break
 		}
-		s := stationStats[station]
-		mean := s.sum / float64(s.count)
-		fmt.Fprintf(output, "%s=%.1f/%.1f/%.1f", station, s.min, mean, s.max)
+		_, err := f.Seek(seekOffset, io.SeekStart)
+		if err != nil {
+			return nil, err
+		}
+		n, _ := io.ReadFull(f, buf)
+		chunk := buf[:n]
+		newline := bytes.LastIndexByte(chunk, '\n')
+		if newline < 0 {
+			return nil, fmt.Errorf("newline not found at offset %d", offset+splitSize-maxLineLength)
+		}
+		remaining := len(chunk) - newline - 1
+		nextOffset := seekOffset + int64(len(chunk)) - int64(remaining)
+		parts = append(parts, part{offset, nextOffset - offset})
+		offset = nextOffset
 	}
-	fmt.Fprint(output, "}\n")
-	return nil
-
+	return parts, nil
+}
 
 func main() {
+	fmt.Println("Processing started...")
+
 	inputPath := "measurements.txt"
-	var buf bytes.Buffer
-	err := r1(inputPath, &buf)
+	outputPath := "output.txt"
+	file, err := os.Create(outputPath)
 	if err != nil {
 		log.Fatal(err)
 	}
-	
+	defer file.Close()
+
+	var buf bytes.Buffer
+	err = r8(inputPath, &buf)
+	if err != nil {
+		log.Fatal(err)
+	}
+
+	// Write the result to the output file
+	_, err = file.Write(buf.Bytes())
+	if err != nil {
+		log.Fatal(err)
+	}
+
 	// Print the result
 	result := buf.String()
-	println(result)
+	fmt.Println("Processing completed.")
+	fmt.Println("Number of lines in measurements.txt:", result)
 }
