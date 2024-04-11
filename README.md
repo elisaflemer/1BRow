@@ -29,3 +29,16 @@ Abha=-29.5/18.0/71.6, Abidjan=-21.9/26.0/76.3, Abéché=-16.8/29.4/80.0, Accra=-
 **Tempo de execução:** 2m58s
 
 ## Como rodar
+
+Para executar o código, siga estas etapas:
+
+1. Certifique-se de ter o Go instalado em seu sistema. Caso contrário, faça o download e instale a partir do site oficial: https://golang.org/.
+2. Baixe ou gere o arquivo de texto de dados do desafio, com nome measurements.txt
+3. Clone este repositório
+4. Rode os seguintes comandos
+
+```
+go mod init
+go mod tidy
+go run challenge.go
+```
